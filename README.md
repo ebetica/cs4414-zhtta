@@ -1,4 +1,4 @@
-cs4414-ps3
-==========
+ps3
+===
 
-Problem set 3 zhtta for CS4414
+Starting code for Problem Set 3 of CS4414.
