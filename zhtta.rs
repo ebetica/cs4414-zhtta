@@ -88,7 +88,16 @@ fn main() {
 		*count += 1;
 	    };
             
-            let mut stream = stream.take();
+            let mut stream = stream.take().unwrap();
+
+	    let in_charlottesville = match stream.peer_name() {
+		    Some(pn) => {
+			let s = pn.to_str();
+			s.slice_chars(0, 6) == "137.54" || s.slice_chars(0,7)=="128.143"
+		    },
+		    None => false
+	    };
+
             let mut buf = [0, ..500];
             stream.read(buf);
             let request_str = str::from_utf8(buf);
@@ -97,6 +106,15 @@ fn main() {
             if req_group.len() > 2 {
                 let path = req_group[1];
                 println(fmt!("Request for path: \n%?", path));
+		/*
+		let peer = match stream {
+		    Some(k) => match k.peername() {
+			Some(p) => p.to_str(),
+			None => ~""
+		    },
+		    None => ""
+		};
+		*/
                 
                 let file_path = ~os::getcwd().push(path.replace("/../", ""));
                 if !os::path_exists(file_path) || os::path_is_dir(file_path) {
@@ -117,7 +135,7 @@ fn main() {
                 }
                 else {
                     // may do scheduling here
-                    let msg: sched_msg = sched_msg{stream: stream, filepath: file_path.clone()};
+                    let msg: sched_msg = sched_msg{stream: Some(stream), filepath: file_path.clone()};
                     child_chan.send(msg);
                     
                     println(fmt!("get file request: %?", file_path));
