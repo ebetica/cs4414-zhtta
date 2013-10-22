@@ -15,7 +15,7 @@
 extern mod extra;
 
 use std::rt::io::*;
-use std::rt::io::net::ip::{SocketAddr, Ipv4Addr};
+use std::rt::io::net::ip::SocketAddr;
 use std::io::println;
 use std::cell::Cell;
 use std::{os, str, io};
@@ -23,11 +23,12 @@ use extra::{arc, priority_queue};
 use std::comm::*;
 
 static PORT:    int = 4414;
-static IPV4_LOOPBACK: &'static str = "127.0.0.1";
+static IP: &'static str = "0.0.0.0"; 
 
 struct sched_msg {
     in_charlottesville: bool,
     file_req_size: uint,
+    request_id: uint,
     stream: Option<std::rt::io::net::tcp::TcpStream>,
     filepath: ~std::path::PosixPath
 }
@@ -35,16 +36,23 @@ struct sched_msg {
 impl Ord for sched_msg {
     // Higher priority programs are given priority on the queue.
     fn lt(&self, other: &sched_msg) -> bool { 
-	if (self.in_charlottesville && !other.in_charlottesville) {
-	    true
+	if (self.in_charlottesville ^ other.in_charlottesville) {
+	    !self.in_charlottesville && other.in_charlottesville
+		// If you are not in charlottesville but other is, let other go first
+	}
+	else if (self.file_req_size != other.file_req_size) {
+	    self.file_req_size > other.file_req_size 
+		// If your file size is bigger than other's, let other go first.
 	}
 	else {
-	    self.file_req_size < other.file_req_size
+	    self.request_id > other.request_id
+		//tie breaker is id, oldest request goes first.
 	}
     }
 }
 
 fn main() {
+    println("Starting server...");
     let req_vec: ~[sched_msg] = ~[];
     let req_vec = priority_queue::PriorityQueue::from_vec(req_vec);
     let shared_req_vec = arc::RWArc::new(req_vec);
@@ -56,34 +64,46 @@ fn main() {
 
     // add file requests into queue.
     do spawn {
-	while(true) {
+	loop {
 	    do add_vec.write |vec| {
-		let tf:sched_msg = port.recv();
-		(*vec).push(tf);
-		println("add to queue");
+		    let tf:sched_msg = port.recv();
+		    (*vec).push(tf);
+		    println(fmt!("add to queue with queue size = %u", (*vec).len()));
 	    }
 	}
     }
 
     // take file requests from queue, and send a response.
     do spawn {
-	while(true) {
+	loop {
 	    do take_vec.write |vec| {
-		let mut tf = (*vec).pop();
+		if (*vec).len() > 0 {
+		    let mut tf = (*vec).pop();
+		    println(fmt!("popped from queue with queue size = %u", (*vec).len()));
 
-		match io::read_whole_file(tf.filepath) {
-		    Ok(file_data) => {
-			tf.stream.write(file_data);
-		    }
-		    Err(err) => {
-			println(err);
+		    match io::read_whole_file(tf.filepath) {
+			Ok(file_data) => {
+			    println(fmt!("begin serving file [%?]", tf.filepath));
+			    tf.stream.write(file_data);
+			    tf.stream.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream; charset=UTF-8\r\n\r\n".as_bytes());
+			    tf.stream.write(file_data);
+			    println(fmt!("finish file [%?]", tf.filepath));
+			}
+			Err(err) => {
+			    println(err);
+			}
 		    }
 		}
 	    }
 	}
     }
 
-    let socket = net::tcp::TcpListener::bind(SocketAddr {ip: Ipv4Addr(127,0,0,1), port: PORT as u16});
+    let ip = match FromStr::from_str(IP) { 
+	Some(ip) => ip, 
+	None => { println(fmt!("Error: Invalid IP address <%s>", IP)); return;},
+    };
+    let socket = net::tcp::TcpListener::bind(SocketAddr {ip: ip, port: PORT as u16});
+    //let socket = net::tcp::TcpListener::bind(SocketAddr {ip: Ipv4Addr(127,0,0,1), port: PORT as u16});
 
     println(fmt!("Listening on tcp port %d ...", PORT));
     let mut acceptor = socket.listen().unwrap();
@@ -148,7 +168,14 @@ fn main() {
 			    0u
 			}
 		    };
-		    let msg: sched_msg = sched_msg{file_req_size: file_size, in_charlottesville: in_charlottesville, stream: Some(stream), filepath: file_path.clone()};
+		    let req_id = visitor_count.read(|count| { *count });
+		    let msg: sched_msg = sched_msg{
+			file_req_size: file_size, 
+			in_charlottesville: in_charlottesville, 
+			request_id: req_id,
+			stream: Some(stream), 
+			filepath: file_path.clone()
+		    };
 		    child_chan.send(msg);
 
 		    println(fmt!("get file request: %?", file_path));
