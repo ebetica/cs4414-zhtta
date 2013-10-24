@@ -7,7 +7,9 @@
 #ab -n25 -c3 http://127.0.0.1:4414/test/1000chars.txt > test_5.txt & 
 
 if [ ! -f ./test/zhtta-test-urls.httperf ]; then
+    cd ./test
     ./test/gentestfile.sh
+    cd ..
 fi
 
 httperf --server localhost --port 4414 --rate 60 --num-conns 60 --wlog=y,./test/zhtta-test-urls.httperf
