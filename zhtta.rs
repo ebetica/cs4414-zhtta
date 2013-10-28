@@ -79,7 +79,7 @@ fn main() {
 	do spawn {
 		loop {
 			do take_vec.write |vec| {
-					if (*vec).len() > 0 {
+				if (*vec).len() > 0 {
 					let mut tf = (*vec).pop();
 					println(fmt!("popped from queue with queue size = %u", (*vec).len()));
 
@@ -94,7 +94,7 @@ fn main() {
 							println(err);
 						}
 					}
-					}
+				}
 			}
 		}
 	}
@@ -138,9 +138,15 @@ fn main() {
 
 			let req_group : ~[&str]= request_str.splitn_iter(' ', 3).collect();
 			if req_group.len() > 2 {
-				let path = req_group[1];
+				let mut path = req_group[1].to_owned();
+				let mut oldpath = ~"";
+				while path != oldpath {
+					oldpath = path;
+					path = oldpath.replace("/../", "");
+				}
+
 				println(fmt!("Request for path: \n%?", path));
-				let file_path = ~os::getcwd().push(path.replace("/../", ""));
+				let file_path = ~os::getcwd().push(path);
 				if !os::path_exists(file_path) || os::path_is_dir(file_path) {
 					println(fmt!("Request received:\n%s", request_str));
 					let response: ~str = fmt!(
