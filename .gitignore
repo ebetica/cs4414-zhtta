@@ -1,3 +1,4 @@
 zhtta~
 test_*
 *.bin
+test/zhtta-test-urls.httperf

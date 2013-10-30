@@ -23,7 +23,7 @@ use extra::{arc, priority_queue};
 use std::comm::*;
 
 static PORT:    int = 4414;
-static IP: &'static str = "0.0.0.0"; 
+static IP: &'static str = "127.0.0.1"; 
 
 struct sched_msg {
 	in_charlottesville: bool,
@@ -56,44 +56,43 @@ fn main() {
 	let req_vec: ~[sched_msg] = ~[];
 	let req_vec = priority_queue::PriorityQueue::from_vec(req_vec);
 	let shared_req_vec = arc::RWArc::new(req_vec);
-	let add_vec = shared_req_vec.clone();
 	let take_vec = shared_req_vec.clone();
 
 	let (port, chan) = stream();
 	let chan = SharedChan::new(chan);
 
-	// add file requests into queue.
 	do spawn {
-		loop {
-			do add_vec.write |vec| {
-				println("Begin adding request to queue");
-				let tf:sched_msg = port.recv();
-				println("Recieved message from port");
-				(*vec).push(tf);
-				println(fmt!("add to queue with queue size = %u", (*vec).len()));
+		let (sm_port, sm_chan) = stream();
+		let (lock_port, lock_chan) = stream();
+
+		// take file requests from queue, and send a response.
+		do spawn {
+			lock_chan.send("");
+			loop {
+				let mut tf:sched_msg = sm_port.recv();
+				match io::read_whole_file(tf.filepath) {
+					Ok(file_data) => {
+						println(fmt!("begin serving file [%?]", tf.filepath));
+						tf.stream.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream; charset=UTF-8\r\n\r\n".as_bytes());
+						tf.stream.write(file_data);
+						println(fmt!("finish file [%?]", tf.filepath));
+					}
+					Err(err) => {
+						println(err);
+					}
+				}
+				lock_chan.send("");
 			}
 		}
-	}
 
-	// take file requests from queue, and send a response.
-	do spawn {
 		loop {
+			port.recv(); //Wait for arriving notifications
+			lock_port.recv(); //wait for file to finish serving
 			do take_vec.write |vec| {
 				if (*vec).len() > 0 {
-					let mut tf = (*vec).pop();
+					let tf = (*vec).pop();
 					println(fmt!("popped from queue with queue size = %u", (*vec).len()));
-
-					match io::read_whole_file(tf.filepath) {
-						Ok(file_data) => {
-							println(fmt!("begin serving file [%?]", tf.filepath));
-							tf.stream.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream; charset=UTF-8\r\n\r\n".as_bytes());
-							tf.stream.write(file_data);
-							println(fmt!("finish file [%?]", tf.filepath));
-						}
-						Err(err) => {
-							println(err);
-						}
-					}
+					sm_chan.send(tf);
 				}
 			}
 		}
@@ -118,6 +117,7 @@ fn main() {
 
 		// Start a new task to handle the connection
 		let child_chan = chan.clone();
+		let child_vec = shared_req_vec.clone();
 		let visitor_count = visitor_count_master.clone();
 		do spawn {
 			visitor_count.write( |count| { *count += 1;} );
@@ -184,8 +184,16 @@ fn main() {
 										   stream: Some(stream), 
 										   filepath: file_path.clone()
 					};
+					let (sm_port, sm_chan) = std::comm::stream();
+					sm_chan.send(msg);
+
+					do child_vec.write |vec| {
+						let msg = sm_port.recv();
+						(*vec).push(msg); // enqueue new request.
+						println(fmt!("add to queue with queue size %u", (*vec).len()));
+					}
 					println("Sending file request...");
-					child_chan.send(msg);
+					child_chan.send(""); //Notify the arriving request
 
 					println(fmt!("get file request: %?", file_path));
 				}
