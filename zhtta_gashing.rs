@@ -25,7 +25,7 @@ use std::comm::*;
 mod gash;
 
 static PORT:    int = 4414;
-static IP: &'static str = "127.0.0.1"; 
+static IP: &'static str = "0.0.0.0"; 
 
 struct sched_msg {
 	in_charlottesville: bool,
@@ -53,120 +53,75 @@ impl Ord for sched_msg {
 	}
 }
 
-struct cached_info {
-	filepath: ~std::path::PosixPath,
-	filedata: ~[u8],
-	id: uint
-}
-
-impl Ord for cached_info {
-	fn lt(&self, other: &cached_info) -> bool {
-		self.id > other.id // If you're older, you get uncached first.
-	}
-}
-
 fn main() {
 	println("Starting server...");
 	let req_vec: ~[sched_msg] = ~[];
 	let req_vec = priority_queue::PriorityQueue::from_vec(req_vec);
 	let shared_req_vec = arc::RWArc::new(req_vec);
+	let add_vec = shared_req_vec.clone();
 	let take_vec = shared_req_vec.clone();
 
 	let (port, chan) = stream();
 	let chan = SharedChan::new(chan);
 
+	// add file requests into queue.
 	do spawn {
-		let (sm_port, sm_chan) = stream();
-		let (lock_port, lock_chan) = stream();
-
-		// take file requests from queue, and send a response.
-		do spawn {
-			lock_chan.send("");
-			let mut id = 0;
-			let cache: ~[cached_info] = ~[];
-			let mut cache = priority_queue::PriorityQueue::from_vec(cache);
-			loop {
-				let mut tf:sched_msg = sm_port.recv();
-
-				tf.stream.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream; charset=UTF-8\r\n\r\n".as_bytes());
-
-				let mut in_cache = false;
-				if cache.len() == 3 { //Cache is filled up
-					for item in cache.iter() {
-						if item.filepath == tf.filepath {
-							println(fmt!("Serving file from cache [%?]", item.filepath.to_str()));
-							tf.stream.write(item.filedata);
-							in_cache = true;
-						}
-					}
-				}
-
-				if !in_cache {
-					println(fmt!("Reading file because it is not in cache with length [%?]!", cache.len()));
-					println(fmt!("begin serving file from disk [%?]", tf.filepath));
-					if cache.len() == 3 { cache.pop(); }
-					let file_data = 
-						if (tf.filepath.filetype().unwrap() == ".html") {
-							let mut file_str = match io::read_whole_file_str(tf.filepath) {
-								Ok(s) => s,
-								Err(err) => {println(err); ~""}
-							};
-							while(true) {
-								match file_str.find_str("#exec") {
-									Some(startIndex) => {
-										let mut command = ~"";
-										let mut index = startIndex+11;
-										while(true) {
-											let ch = file_str.char_at(index);
-											index = index+1;
-											if(ch == '\"') {break;}
-											command = command + str::from_char(ch);
-										}
-
-										let output = match gash::handle_cmdline(command) {
-											Some(o) => str::from_utf8(o.output),
-											None => ~""
-										};
-										file_str = file_str.replace(file_str.slice(startIndex,index),output);
-									}
-									None => {break;}
-								};
-							};
-							file_str.as_bytes().to_owned()
-						} else {
-							match io::read_whole_file(tf.filepath) {
-								Ok(file_data) => file_data,
-								Err(err) => {
-									println(err);
-									~[]
-								}
-							}
-						};
-
-					let c = 
-						cached_info {
-							filepath: tf.filepath.clone(),
-							filedata: file_data,
-							id: id
-						};
-					tf.stream.write(c.filedata);
-					cache.push(c);
-					id+=1;
-				}
-
-				println(fmt!("finish file [%?]", tf.filepath));
-				lock_chan.send("");
+		loop {
+			do add_vec.write |vec| {
+				let tf:sched_msg = port.recv();
+				(*vec).push(tf);
+				println(fmt!("add to queue with queue size = %u", (*vec).len()));
 			}
 		}
+	}
 
+	// take file requests from queue, and send a response.
+	do spawn {
 		loop {
-			port.recv(); //Wait for arriving notifications
-			lock_port.recv(); //wait for file to finish serving
 			do take_vec.write |vec| {
 				if (*vec).len() > 0 {
-					let tf = (*vec).pop();
+					let mut tf = (*vec).pop();
 					println(fmt!("popped from queue with queue size = %u", (*vec).len()));
-					sm_chan.send(tf);
+
+					match io::read_whole_file(tf.filepath) {
+						Ok(file_data) => {
+							println(fmt!("begin serving file [%?]", tf.filepath));
+							tf.stream.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream; charset=UTF-8\r\n\r\n".as_bytes());
+							if(tf.filepath.filetype().unwrap() == ".html") {
+								let mut file_str = match io::read_whole_file_str(tf.filepath) {
+									Ok(s) => s,
+									Err(err) => {println(err); ~""}
+								};
+								while(true) {
+									let index = match file_str.find_str("#exec") {
+										Some(startIndex) => {
+											let mut command = ~"";
+											let mut index = startIndex+11;
+											while(true) {
+												let ch = file_str.char_at(index);
+												index = index+1;
+												if(ch == '\"') {break;}
+												command = command + str::from_char(ch);
+											}
+
+											let output = match gash::handle_cmdline(command) {
+												Some(o) => str::from_utf8(o.output),
+												None => ~""
+											};
+											file_str.replace(file_str.slice(startIndex,index),output);
+										}
+										None => {break;}
+									};
+								};
+								tf.stream.write(file_str.as_bytes());
+							}
+							else {tf.stream.write(file_data);}
+							println(fmt!("finish file [%?]", tf.filepath));
+						}
+						Err(err) => {
+							println(err);
+						}
+					}
 				}
 			}
 		}
@@ -191,7 +146,6 @@ fn main() {
 
 		// Start a new task to handle the connection
 		let child_chan = chan.clone();
-		let child_vec = shared_req_vec.clone();
 		let visitor_count = visitor_count_master.clone();
 		do spawn {
 			visitor_count.write( |count| { *count += 1;} );
@@ -212,15 +166,9 @@ fn main() {
 
 			let req_group : ~[&str]= request_str.splitn_iter(' ', 3).collect();
 			if req_group.len() > 2 {
-				let mut path = req_group[1].to_owned();
-				let mut oldpath = ~"";
-				while path != oldpath {
-					oldpath = path;
-					path = oldpath.replace("/../", "");
-				}
-
+				let path = req_group[1];
 				println(fmt!("Request for path: \n%?", path));
-				let file_path = ~os::getcwd().push(path);
+				let file_path = ~os::getcwd().push(path.replace("/../", ""));
 				if !os::path_exists(file_path) || os::path_is_dir(file_path) {
 					println(fmt!("Request received:\n%s", request_str));
 					let response: ~str = fmt!(
@@ -239,7 +187,7 @@ fn main() {
 				}
 				else {
 					// may do scheduling here
-					println("Starting to send file request...");
+
 					let file_size = match io::file_reader(file_path) {
 						Ok(file) => {
 							file.seek(0, io::SeekEnd);
@@ -258,16 +206,7 @@ fn main() {
 										   stream: Some(stream), 
 										   filepath: file_path.clone()
 					};
-					let (sm_port, sm_chan) = std::comm::stream();
-					sm_chan.send(msg);
-
-					do child_vec.write |vec| {
-						let msg = sm_port.recv();
-						(*vec).push(msg); // enqueue new request.
-						println(fmt!("add to queue with queue size %u", (*vec).len()));
-					}
-					println("Sending file request...");
-					child_chan.send(""); //Notify the arriving request
+					child_chan.send(msg);
 
 					println(fmt!("get file request: %?", file_path));
 				}
