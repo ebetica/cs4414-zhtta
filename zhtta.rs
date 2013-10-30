@@ -51,6 +51,18 @@ impl Ord for sched_msg {
 	}
 }
 
+struct cached_info {
+	filepath: ~std::path::PosixPath,
+	filedata: ~[u8],
+	id: uint
+}
+
+impl Ord for cached_info {
+	fn lt(&self, other: &cached_info) -> bool {
+		self.id > other.id // If you're older, you get uncached first.
+	}
+}
+
 fn main() {
 	println("Starting server...");
 	let req_vec: ~[sched_msg] = ~[];
@@ -68,19 +80,47 @@ fn main() {
 		// take file requests from queue, and send a response.
 		do spawn {
 			lock_chan.send("");
+			let mut id = 0;
+			let cache: ~[cached_info] = ~[];
+			let mut cache = priority_queue::PriorityQueue::from_vec(cache);
 			loop {
 				let mut tf:sched_msg = sm_port.recv();
-				match io::read_whole_file(tf.filepath) {
-					Ok(file_data) => {
-						println(fmt!("begin serving file [%?]", tf.filepath));
-						tf.stream.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream; charset=UTF-8\r\n\r\n".as_bytes());
-						tf.stream.write(file_data);
-						println(fmt!("finish file [%?]", tf.filepath));
-					}
-					Err(err) => {
-						println(err);
+
+				tf.stream.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream; charset=UTF-8\r\n\r\n".as_bytes());
+
+				let mut in_cache = false;
+				if cache.len() == 3 { //Cache is filled up
+					for item in cache.iter() {
+						if item.filepath == tf.filepath {
+							println(fmt!("Serving file from cache [%?]", item.filepath.to_str()));
+							tf.stream.write(item.filedata);
+							in_cache = true;
+						}
 					}
 				}
+
+				if !in_cache {
+					println(fmt!("Reading file because it is not in cache with length [%?]!", cache.len()));
+					println(fmt!("begin serving file from disk [%?]", tf.filepath));
+					if cache.len() == 3 { cache.pop(); }
+					let c = 
+						cached_info {
+							filepath: tf.filepath.clone(),
+							filedata: match io::read_whole_file(tf.filepath) {
+								Ok(file_data) => file_data,
+								Err(err) => {
+									println(err);
+									~[]
+								}
+							},
+							id: id
+						};
+					tf.stream.write(c.filedata);
+					cache.push(c);
+					id+=1;
+				}
+
+				println(fmt!("finish file [%?]", tf.filepath));
 				lock_chan.send("");
 			}
 		}
